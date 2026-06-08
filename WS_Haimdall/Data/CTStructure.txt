@@ -1,0 +1,79 @@
+-----------------Table-------------------------------
+
+
+CREATE TABLE [dbo].[tbl_CycleTIme](
+	[ID] [int] IDENTITY(1,1) NOT NULL,
+	[TagName] [varchar](50) NULL,
+	[Biwno] [varchar](50) NULL,
+	[Model_Code] [smallint] NULL,
+	[CycleTime] [smallint] NULL,
+	[Item_ID] [bigint] NULL,
+ CONSTRAINT [PK_tbl_CycleTIme] PRIMARY KEY CLUSTERED 
+(
+	[ID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+
+--------------------------SP----------------------
+
+create PROCEDURE SP_CycleTimeInsert
+	-- exec SP_CycleTimeInsert '[{"TagName":"RF_RF010GF_Item_ID","BiwNo":"11","ItemId":"3","CycleTime":200,"ModelCode":"500","Timestamp":"2026-03-25T14:28:00.2288145+05:30"}]'
+	@Json NVARCHAR(MAX)
+AS
+BEGIN
+	
+	begin try	
+	begin tran
+
+	-------insert JSON into Temp Table
+
+	DECLARE @TempData TABLE (
+	TagName varchar(50),
+   BiwNo varchar(50) ,
+    ModelCode smallint ,
+	CycleTime smallint ,
+    ItemId bigint 
+);
+
+INSERT INTO @TempData
+SELECT TagName,
+    BiwNo,
+    ModelCode,
+    CycleTime,
+	ItemId
+FROM OPENJSON(@Json)
+WITH (
+	TagName varchar(50) '$.TagName',
+    BiwNo varchar(50) '$.BiwNo',
+    ModelCode smallint '$.ModelCode',
+	CycleTime smallint '$.CycleTime',
+    ItemId bigint '$.ItemId'
+);
+
+----------------Insert @TempData into Cycle Time table
+
+INSERT INTO tbl_CycleTIme (TagName, [Biwno], [Model_Code], [CycleTime], [Item_ID])
+SELECT 
+    T.TagName,
+    T.BiwNo,
+    T.ModelCode,
+    T.CycleTime,
+    T.ItemId
+FROM @TempData T
+LEFT JOIN tbl_CycleTIme C
+    ON C.TagName = T.TagName
+   AND C.Item_ID = T.ItemId
+WHERE C.TagName IS NULL;
+
+	commit tran
+	end try
+	begin catch
+	 IF @@TRANCOUNT > 0
+			ROLLBACK TRAN;
+	 --PRINT ERROR_MESSAGE();
+	end catch
+
+END
+GO

@@ -1,0 +1,98 @@
+﻿----------------------SP-----------------------------------------------------
+USE [JBM]
+GO
+/****** Object:  StoredProcedure [dbo].[SP_Alarm_Bulk_ML10]    Script Date: 24-03-2026 14:51:27 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+alter PROCEDURE [dbo].[SP_Alarm_Bulk_ML10_JSW]
+    @Json NVARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+	begin try
+	begin tran
+	
+	DECLARE @AlarmData TABLE (
+    AlarmCode NVARCHAR(50),
+    Action NVARCHAR(20),
+    [Timestamp] DATETIME
+);
+
+INSERT INTO @AlarmData
+SELECT 
+    AlarmCode,
+    Action,
+    CAST([Timestamp] AS DATETIME)
+FROM OPENJSON(@Json)
+WITH (
+    AlarmCode NVARCHAR(50) '$.AlarmCode',
+    Action NVARCHAR(20) '$.Action',
+    [Timestamp] DATETIMEOFFSET '$.Timestamp'
+);
+
+
+----------------Insert
+INSERT INTO tbl_Alarm_ML10_Primary (AlarmCode, StartTime, EndTime, Duration, [Timestamp])
+SELECT 
+    D.AlarmCode,
+    D.[Timestamp],
+    NULL,
+    NULL,
+    D.[Timestamp]
+FROM @AlarmData D
+LEFT JOIN tbl_Alarm_ML10_Primary A 
+    ON A.AlarmCode = D.AlarmCode AND A.EndTime IS NULL
+WHERE D.Action = 'HIGH'
+AND A.AlarmCode IS NULL;
+
+----------------update
+
+UPDATE A
+SET 
+    A.EndTime = D.[Timestamp],
+    A.Duration = DATEDIFF(SECOND, A.StartTime, D.[Timestamp]),
+    A.[Timestamp] = D.[Timestamp]
+FROM tbl_Alarm_ML10_Primary A
+INNER JOIN @AlarmData D 
+    ON A.AlarmCode = D.AlarmCode
+WHERE D.Action = 'LOW'
+AND A.EndTime IS NULL;
+
+
+	commit tran
+
+end try 
+
+begin catch
+ IF @@TRANCOUNT > 0
+        ROLLBACK TRAN;
+ --PRINT ERROR_MESSAGE();
+end catch
+
+
+
+  
+  
+END
+
+-----------------------------------------------Table-----------------------------------------------
+
+
+CREATE TABLE [dbo].[tbl_Alarm_ML10_Primary](
+	[Id] [int] IDENTITY(1,1) NOT NULL,
+	[AlarmCode] [nvarchar](50) NULL,
+	[StartTime] [datetime] NULL,
+	[EndTime] [datetime] NULL,
+	[Duration] [int] NULL,
+	[Timestamp] [datetime] NULL
+) ON [PRIMARY]
+GO
+-------------------------------------------index---------------------------------------------
+
+CREATE NONCLUSTERED INDEX IX_Alarm_Open
+ON tbl_Alarm_ML10_Primary (AlarmCode)
+WHERE EndTime IS NULL;
+
