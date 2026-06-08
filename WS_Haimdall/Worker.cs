@@ -14,6 +14,7 @@ using WS_Haimdall;
 using WS_Haimdall.Model_Class;
 using static WS_Haimdall.Worker;
 using static WS_Haimdall.NodeIdConfig;
+using Opc.Ua.Security.Certificates;
 
 namespace WS_Haimdall
 {
@@ -92,6 +93,7 @@ namespace WS_Haimdall
 
             var alarmTask = InsertAlarm(stoppingToken);
             var ctTask = InsertCT(stoppingToken);
+            var lineCtTask = InsertLineCT(stoppingToken);
             var subStTask = InsertSubStationCT(stoppingToken);
 
             await Task.WhenAll(alarmTask, ctTask, subStTask);
@@ -166,7 +168,7 @@ namespace WS_Haimdall
                     #region Single Event
                     CreateAlarmSubscription();
                     
-                    //CreateCycleTime_LineCTSubscription();
+                    CreateCycleTime_LineCTSubscription();
 
                     CreateCycleTime_SubstationCTSubscription();
                     #endregion
@@ -255,6 +257,9 @@ namespace WS_Haimdall
 
             foreach (var eachItem in NodeIdConfig.dict_NodeIdConfigLineCT)
             {
+                if (!eachItem.Key.Contains("_BiwNo"))
+                    continue;
+
                 string nodeIdStr = eachItem.Value;
                 var item = new Opc.Ua.Client.MonitoredItem(_cycleTimeLineCTSubscription.DefaultItem)
                 {
@@ -467,7 +472,7 @@ namespace WS_Haimdall
                 ///
                 try
                 {
-                    var cycleTimeLineCTData = await ReadCycleTimeLineCTData();
+                    var cycleTimeLineCTData = await ReadCycleTimeLineCTData(tag);
                     if (cycleTimeLineCTData != null)
                     {
                         lineCTQueue.Enqueue(cycleTimeLineCTData);
@@ -558,51 +563,64 @@ namespace WS_Haimdall
 
         }
 
-        private async Task<CycleTimeLineCTData?> ReadCycleTimeLineCTData()
+        private async Task<CycleTimeLineCTData?> ReadCycleTimeLineCTData(string key)
         {
-
-            var addressCollection = NodeIdConfig.dict_NodeIdConfigLineCT.Values;
-
-            var nodesToRead = new ReadValueIdCollection();
-
-            foreach (var eachAddress in addressCollection)
+            try
             {
-                nodesToRead.Add(new ReadValueId
+                var keyArray = key.Split("_");
+
+                var Id = keyArray[0];
+                var line = keyArray[1];
+
+
+                var ke = $"{Id}_{line}_SubVariant";
+
+                if (dict_NodeIdConfigLineCT.TryGetValue(key, out string valu))
                 {
-                    NodeId = new NodeId(eachAddress),
-                    AttributeId = Attributes.Value
-                });
+
+                }
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_StartTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_EndTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_CycleTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_BiwNo"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_Variant"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineCT[$"{Id}_{line}_SubVariant"]), AttributeId = Attributes.Value }
+                };
+
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+                return new CycleTimeLineCTData
+                {
+                    LineID = Convert.ToInt32(Id),
+                    StartTime = ConvertPlcDateTime((byte[])results.Results[0].Value),
+                    EndTime = ConvertPlcDateTime((byte[])results.Results[1].Value),
+                    CycleTime = Convert.ToInt32(results.Results[2].Value),
+                    Biwno = Convert.ToString(results.Results[3].Value),
+                    VarriantCode = Convert.ToInt32(results.Results[4].Value),
+                    SubVarraintcode = Convert.ToInt32(results.Results[5].Value),
+                    TimeStamp = ConvertPlcDateTime((byte[])results.Results[1].Value),
+                };
             }
-            //var nodesToRead = new ReadValueIdCollection
-            //    {
-            //        new ReadValueId { NodeId = new NodeId($"ns=3;s=\"CycleTime\".\"FIFO1\".\"BIW_No\""), AttributeId = Attributes.Value },
-            //        new ReadValueId { NodeId = new NodeId($"ns=3;s=\"CycleTime\".\"FIFO1\".\"Model_Code\""), AttributeId = Attributes.Value },
-            //        new ReadValueId { NodeId = new NodeId($"ns=3;s=\"CycleTime\".\"FIFO1\".\"Cycle_Time\""), AttributeId = Attributes.Value }
-            //    };
-
-            var results = await session.ReadAsync(
-                null,
-                0,
-                TimestampsToReturn.Source,
-                nodesToRead,
-                CancellationToken.None
-            );
-
-            bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
-
-            if (!isAllGood)
-                return null;
-
-            return new CycleTimeLineCTData
+            catch (Exception ex)
             {
-
-                StartTime = Convert.ToDateTime(results.Results[0].Value),
-                EndTime = Convert.ToDateTime(results.Results[1].Value),
-                CycleTime = Convert.ToInt32(results.Results[2].Value),
-                Biwno = Convert.ToInt32(results.Results[3].Value),
-                VarriantCode = Convert.ToInt32(results.Results[4].Value),
-                SubVarraintcode = Convert.ToInt32(results.Results[5].Value),
-            };
+                return null;
+            }
+            
         }
 
         private async Task<CycleTimeSubStaionCTData?> ReadCycleTimeSubStationCTData(string key)
@@ -611,38 +629,38 @@ namespace WS_Haimdall
             {
                 var keyArray = key.Split('_');
 
-                var lineId = keyArray[0];
+                var Id = keyArray[0];
                 var subStation = keyArray[1];
 
                 var nodesToRead = new ReadValueIdCollection
                 {
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_StartTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_EndTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_CycleTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_BiwNo"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Variant"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_SubVariant"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Emergency"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_TipChange"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_TipDress"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_OperatorLoadingStarvingTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Block_Time"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Manual"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_PartPresentFault"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_RollMoveTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_LifterMoveTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_TurnTableMoveTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_ClampTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_DeclampTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_MarriageMissMatch"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_DropTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_WeldTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_PickTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_SealingTime"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_SafetyGate"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Miscellaneous"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_MaterialCall"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{lineId}_{subStation}_Others"]), AttributeId = Attributes.Value }
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_StartTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_EndTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_CycleTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_BiwNo"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Variant"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_SubVariant"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Emergency"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_TipChange"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_TipDress"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_OperatorLoadingStarvingTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Block_Time"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Manual"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_PartPresentFault"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_RollMoveTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_LifterMoveTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_TurnTableMoveTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_ClampTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_DeclampTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_MarriageMissMatch"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_DropTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_WeldTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_PickTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_SealingTime"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_SafetyGate"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Miscellaneous"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_MaterialCall"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigSubstationCT[$"{Id}_{subStation}_Others"]), AttributeId = Attributes.Value }
                 };
 
                 var results = await session.ReadAsync(
@@ -691,7 +709,7 @@ namespace WS_Haimdall
                     MaterialCall = Convert.ToInt32(results.Results[25].Value),
                     Others = Convert.ToInt32(results.Results[26].Value),
                     TimeStamp = ConvertPlcDateTime((byte[])results.Results[1].Value),
-                    Sub_StationID = Convert.ToInt32(lineId)
+                    Sub_StationID = Convert.ToInt32(Id)
 
                 };
 
@@ -840,6 +858,47 @@ namespace WS_Haimdall
             }
         }
 
+
+        private async Task InsertLineCT(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _LineCTSignal.WaitAsync(stoppingToken); // ⏳ wait for data
+
+
+                    List<CycleTimeLineCTData> batch = new();/* int maxBatchSize = 2000;*/
+
+                    //lock (queueLock) // 🔒 FREEZE QUEUE
+                    //{
+                    while (lineCTQueue.TryDequeue(out var CT))
+                    {
+                        batch.Add(CT);
+                    }
+                    //}
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertLineCT(jsonString);
+                        //Console.WriteLine($"{batch[0].TagName} | {batch[0].Value} | {batch[0].Timestamp}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error in background worker.");
+                }
+
+            }
+        }
 
         private async Task InsertSubStationCT(CancellationToken stoppingToken)
         {
@@ -1234,10 +1293,11 @@ namespace WS_Haimdall
             public DateTime? StartTime { get; set; }
             public DateTime? EndTime { get; set; }
             public int? CycleTime { get; set; }
-            public int? Biwno { get; set; }
+            public string? Biwno { get; set; }
             public int? VarriantCode { get; set; }
             public int? SubVarraintcode { get; set; }
             public DateTime? TimeStamp { get; set; }
+            
         }
 
         public class CycleTimeSubStaionCTData

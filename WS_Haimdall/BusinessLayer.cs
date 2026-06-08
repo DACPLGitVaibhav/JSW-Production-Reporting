@@ -83,6 +83,26 @@ namespace WS_Haimdall
             }
         }
 
+        public async Task<int> InsertLineCT(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_CT_Line", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+
+                //await Insert_ErrorLog("Update_Status_Received", ex.Message, ex.StackTrace);
+                return 0;
+            }
+        }
+
 
         public async Task<int> InsertSubStationCT(object jsonString)
         {

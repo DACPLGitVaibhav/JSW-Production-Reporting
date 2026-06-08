@@ -27,7 +27,7 @@ namespace WS_Haimdall
         {
             ConcurrentDictionary<string, string> dict_NodeIdConfg = new ConcurrentDictionary<string, string>();
 
-            string query = $@"SELECT [Key], [Value] FROM tbl_Mast_NodeConfg WHERE GroupName = '{GroupName}'";
+            string query = $@"SELECT [Key], [Value] FROM tbl_Mast_NodeConfg WHERE GroupName = '{GroupName}' AND IsActive = 'true'";
 
             DataSet ds = ExecSqlDataSet(query, CommandType.Text);
 
