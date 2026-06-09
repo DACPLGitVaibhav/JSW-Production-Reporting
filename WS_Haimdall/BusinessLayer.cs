@@ -8,6 +8,8 @@ using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using static WS_Haimdall.Cache.AppCache;
+using Serilog;
 
 namespace WS_Haimdall
 {
@@ -22,25 +24,31 @@ namespace WS_Haimdall
 
         public void FillAlarmMaster()
         {
-            AlarmTags.dict_AlarmTags = dbl.GetAlarmMappings();
+            dict_AlarmTags = dbl.GetAlarmMappings();
         }
 
         public void FillNodeIdConfig()
         {
-            string[] GroupNames = { "Line CT", "SubStation CT" };
-
-
-            foreach(var eachGrp in GroupNames)
+            try
             {
-                if(eachGrp == "Line CT")
-                    NodeIdConfig.dict_NodeIdConfigLineCT = dbl.LoadNodeIdConfig(eachGrp);
-                else if (eachGrp == "SubStation CT")
-                    NodeIdConfig.dict_NodeIdConfigSubstationCT = dbl.LoadNodeIdConfig(eachGrp);
+                string[] GroupNames = { "Line CT", "SubStation CT", "Production" };
 
+                foreach (var eachGrp in GroupNames)
+                {
+                    if (eachGrp == "Line CT")
+                        dict_NodeIdConfigLineCT = dbl.LoadNodeIdConfig(eachGrp);
+                    else if (eachGrp == "SubStation CT")
+                        dict_NodeIdConfigSubstationCT = dbl.LoadNodeIdConfig(eachGrp);
+                    else if (eachGrp == "Production")
+                        dict_NodeIdConfigLineWiseProdData = dbl.LoadNodeIdConfig(eachGrp);
+
+                }
             }
-
+            catch(Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+            }
             
-
         }
 
         
@@ -59,7 +67,7 @@ namespace WS_Haimdall
             catch (Exception ex)
             {
 
-                //await Insert_ErrorLog("Update_Status_Received", ex.Message, ex.StackTrace);
+                Log.Error(ex, ex.ToString());
                 return 0;
             }
         }
@@ -77,8 +85,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-
-                //await Insert_ErrorLog("Update_Status_Received", ex.Message, ex.StackTrace);
+                Log.Error(ex, ex.ToString());
                 return 0;
             }
         }
@@ -97,8 +104,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-
-                //await Insert_ErrorLog("Update_Status_Received", ex.Message, ex.StackTrace);
+                Log.Error(ex, ex.ToString());
                 return 0;
             }
         }
@@ -118,8 +124,26 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
 
-                //await Insert_ErrorLog("Update_Status_Received", ex.Message, ex.StackTrace);
+        public async Task<int> InsertLineWiseProdData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@JsonData", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_Production", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
                 return 0;
             }
         }
@@ -145,90 +169,6 @@ namespace WS_Haimdall
         }
 
 
-        //public DataSet BindRunningParts()
-        //{
-        //    return dbl.ExecSqlDataSet("SP_GetRunningPartID", CommandType.StoredProcedure);
-        //}
-
-        //public object MaxSessionByVC(object PartID)
-        //{
-        //    try
-        //    {
-        //        var listParas = new List<SqlParameter>()
-        //    {
-        //     new SqlParameter("@PartID", PartID)
-
-        //    };
-        //        return dbl.ExecSqlScalar("select dbo.SVF_GetMaxSessionNoByVC(@PartID) as MaxSessionNo", CommandType.Text, listParas);
-        //    }
-        //    catch (Exception ex)
-        //    {
-
-        //        throw;
-        //    }
-        //}
-        //// USer Station Verify
-        //public DataSet GetPartConfigByID(object PartID)
-        //{
-        //    var listParas = new List<SqlParameter>()
-        //    {
-
-        //     new SqlParameter("@PartID", PartID)
-        //    // new SqlParameter( "@LogDate", LogDate),
-
-
-        //    };
-        //    return dbl.ExecSqlDataSet("SP_GetPartUserByVariantCode", CommandType.StoredProcedure, listParas);
-        //}
-        //// Tool Verify
-        //public DataSet GetToolBarcodeBYPartID(object PartID)
-        //{
-        //    var listParas = new List<SqlParameter>()
-        //    {
-
-        //     new SqlParameter("@PartID", PartID)
-        //    // new SqlParameter( "@LogDate", LogDate),
-
-
-        //    };
-        //    return dbl.ExecSqlDataSet("SP_GetToolBarcodeBYPartID", CommandType.StoredProcedure, listParas);
-        //}
-
-
-        //public DataSet IspartRunning(object PartID)
-        //{
-        //    var listParas = new List<SqlParameter>()
-        //    {
-        //     new SqlParameter("@PartID", PartID)
-        //    // new SqlParameter( "@LogDate", LogDate),
-
-        //    };
-        //    return dbl.ExecSqlDataSet("SP_IsPartRunning", CommandType.StoredProcedure, listParas);
-        //}
-        //public DataSet IsProcessComplete()
-        //{
-
-        //    return dbl.ExecSqlDataSet("SP_IsProcessComplete", CommandType.StoredProcedure);
-        //}
-
-        //public int GetToolIDbyStationID(object StationID)
-        //{
-        //    try
-        //    {
-        //        var listParas = new List<SqlParameter>()
-        //    {
-
-        //     new SqlParameter("@StationID", StationID)
-
-        //    };
-        //        return Convert.ToInt32(dbl.ExecSqlScalar("Sp_GetToolIDByStationID", CommandType.StoredProcedure, listParas));
-        //    }
-        //    catch (Exception ex)
-        //    {
-
-        //        throw;
-        //    }
-        //}
 
     }
 }

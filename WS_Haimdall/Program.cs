@@ -3,47 +3,56 @@ using Serilog;
 using WS_Haimdall;
 using WS_Haimdall.Model_Class;
 
-string basePath = AppContext.BaseDirectory;
-string logFolder = Path.Combine(basePath, "logs");
+
+
+
+string logFolder = Path.Combine(AppContext.BaseDirectory, "Logs");
+
 Directory.CreateDirectory(logFolder);
 
-string logFile = Path.Combine(logFolder, "app_log.txt");
-
 Log.Logger = new LoggerConfiguration()
-   .MinimumLevel.Information()
-   .MinimumLevel.Override("Microsoft.Hosting.Lifetime", Serilog.Events.LogEventLevel.Fatal)
-   .WriteTo.Console()
-   //.WriteTo.File(logFile, rollingInterval: RollingInterval.Year)
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .WriteTo.File(
+        path: Path.Combine(logFolder, "log-.txt"),
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 30,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+        shared: true)
+    .CreateLogger();
 
-   //.WriteTo.Logger(lc => lc
-   //     .Filter.ByIncludingOnly(e => e.Properties.ContainsKey("Line") &&
-   //                                  e.Properties["Line"].ToString().Contains("FF"))
-   //     .WriteTo.File(
-   //         Path.Combine(logFolder, "FF.txt"),
-   //         fileSizeLimitBytes: 50 * 1024, //1_000_000,   // 1 MB
-   //         rollOnFileSizeLimit: true,
-   //         rollingInterval: RollingInterval.Infinite))
 
-   //.WriteTo.Map(
-   // keyPropertyName: "Line",
-   // defaultKey: "General",
-   // configure: (line, wt) => wt.File(
-   //     Path.Combine(logFolder, $"{line}.txt"),
-   //     fileSizeLimitBytes: 50 * 1024,  // 50 KB
-   //     rollOnFileSizeLimit: true,
-   //     rollingInterval: RollingInterval.Infinite,
-   //     retainedFileCountLimit: null   // keep all files
-   // ))
-   .CreateLogger();
-
-var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddHostedService<Worker>();
-// Enable Windows Service
-builder.Services.AddWindowsService(options =>
+try
 {
-    options.ServiceName = "WS_Haimdall";
-});
-builder.Services.Configure<appSettings>(
-    builder.Configuration.GetSection("appSettings"));
-var host = builder.Build();
-host.Run();
+
+    var builder = Host.CreateApplicationBuilder(args);
+
+    builder.Logging.ClearProviders();
+    builder.Logging.AddSerilog(Log.Logger);
+
+
+    builder.Services.AddHostedService<Worker>();
+    // Enable Windows Service
+    builder.Services.AddWindowsService(options =>
+    {
+        options.ServiceName = "WS_Haimdall";
+    });
+    builder.Services.Configure<appSettings>(
+        builder.Configuration.GetSection("appSettings"));
+    var host = builder.Build();
+    host.Run();
+
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Service terminated unexpectedly");
+}
+finally
+{
+    
+    //if the service crashed with some reasons,
+    //sometimes it the message will be still in memory,
+    //so by having this line, we it ensures that all the logs are going to be
+    //printed in file, before closing the application.
+    Log.CloseAndFlush();
+}

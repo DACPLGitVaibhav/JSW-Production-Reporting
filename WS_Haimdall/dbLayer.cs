@@ -10,6 +10,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
+using Serilog;
 
 namespace WS_Haimdall
 {
@@ -25,22 +26,31 @@ namespace WS_Haimdall
 
         public ConcurrentDictionary<string, string> LoadNodeIdConfig(string GroupName)
         {
-            ConcurrentDictionary<string, string> dict_NodeIdConfg = new ConcurrentDictionary<string, string>();
-
-            string query = $@"SELECT [Key], [Value] FROM tbl_Mast_NodeConfg WHERE GroupName = '{GroupName}' AND IsActive = 'true'";
-
-            DataSet ds = ExecSqlDataSet(query, CommandType.Text);
-
-            foreach (DataRow row in ds.Tables[0].Rows)
+            try
             {
-                string key = row["Key"].ToString();
-                string value = row["Value"].ToString();
+                ConcurrentDictionary<string, string> dict_NodeIdConfg = new ConcurrentDictionary<string, string>();
 
-                dict_NodeIdConfg[key] = value;
+                string query = $@"SELECT [Key], [Value] FROM tbl_Mast_NodeConfg WHERE GroupName = '{GroupName}' AND IsActive = 'true'";
+
+                DataSet ds = ExecSqlDataSet(query, CommandType.Text);
+
+                foreach (DataRow row in ds.Tables[0].Rows)
+                {
+                    string key = row["Key"].ToString();
+                    string value = row["Value"].ToString();
+
+                    dict_NodeIdConfg[key] = value;
+                }
+
+
+                return dict_NodeIdConfg;
             }
-
-
-            return dict_NodeIdConfg;
+            catch(Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return null;
+            }
+            
         }
 
         public Dictionary<int, string> GetAlarmMappings()
@@ -68,7 +78,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Console.WriteLine(ex.ToString());
+                Log.Error(ex, ex.ToString());
                 return null;
             }
             
