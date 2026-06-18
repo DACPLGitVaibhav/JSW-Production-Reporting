@@ -12,6 +12,10 @@ namespace WS_Haimdall.Model_Class
         public string IP { get; set; }
         public string LogPath { get; set; }        
         public string DB_Connection {  get; set; }
+
+        public int PlcNo { get; set; }
+        public bool isLastPlc { get; set; }
+
     }
 
 }

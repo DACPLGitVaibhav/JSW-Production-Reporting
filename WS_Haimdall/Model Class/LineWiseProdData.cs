@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Opc.Ua;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -10,9 +11,10 @@ namespace WS_Haimdall.Model_Class
     {
         public int? LineID { get; set; }
         public int? HourID { get; set; }
+        public int? JPH_J5_V23 { get; set; }
         public int? Target { get; set; }
-        public int? Actual { get; set; }
 
+        public int? Actual { get; set; }
         public int? J5_Target { get; set; }
         public int? J5_Actual { get; set; }
 
@@ -21,4 +23,7 @@ namespace WS_Haimdall.Model_Class
         public DateTime? Timestamp { get; set; }
         public DateTime? LogDateTime { get; set; }
     }
+
+
 }
+

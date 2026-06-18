@@ -24,69 +24,7 @@ namespace WS_Haimdall
             SqlCon = conn;
         }
 
-        public ConcurrentDictionary<string, string> LoadNodeIdConfig(string GroupName)
-        {
-            try
-            {
-                ConcurrentDictionary<string, string> dict_NodeIdConfg = new ConcurrentDictionary<string, string>();
-
-                string query = $@"SELECT [Key], [Value] FROM tbl_Mast_NodeConfg WHERE GroupName = '{GroupName}' AND IsActive = 'true'";
-
-                DataSet ds = ExecSqlDataSet(query, CommandType.Text);
-
-                foreach (DataRow row in ds.Tables[0].Rows)
-                {
-                    string key = row["Key"].ToString();
-                    string value = row["Value"].ToString();
-
-                    dict_NodeIdConfg[key] = value;
-                }
-
-
-                return dict_NodeIdConfg;
-            }
-            catch(Exception ex)
-            {
-                Log.Error(ex, ex.ToString());
-                return null;
-            }
-            
-        }
-
-        public Dictionary<int, string> GetAlarmMappings()
-        {
-            try
-            {
-                Dictionary<int, string> dict_AlarmAddress = new Dictionary<int, string>();
-
-                string query = @"
-        SELECT AlarmCode,
-               Address
-        FROM tbl_Mast_AlarmTags_New";
-
-                DataSet ds = ExecSqlDataSet(query, CommandType.Text);
-
-                foreach (DataRow row in ds.Tables[0].Rows)
-                {
-                    int alarmCode = Convert.ToInt32(row["AlarmCode"]);
-                    string address = row["Address"].ToString();
-
-                    dict_AlarmAddress[alarmCode] = address;
-                }
-
-                return dict_AlarmAddress;
-            }
-            catch(Exception ex)
-            {
-                Log.Error(ex, ex.ToString());
-                return null;
-            }
-            
-        }
-
-
-
-
+        
         #region ExecSqlNonQuery
         public async Task<int> ExecSqlNonQuery(string strSQL, CommandType cmdType)
         {
