@@ -32,34 +32,7 @@ namespace WS_Haimdall
             dict_AlarmTags = GetAlarmMappings();
         }
 
-        //public void FillNodeIdConfig()
-        //{
-        //    try
-        //    {
-        //        string[] GroupNames = { "Line_CT", "SubStation_CT", "Production", "SubStation_Losses" };
-               
-
-        //        foreach (var eachGrp in GroupNames)
-        //        {
-        //            if (eachGrp == "Line_CT")
-        //                dict_NodeIdConfigLineCT = LoadNodeIdConfig(eachGrp);
-        //            else if (eachGrp == "SubStation_CT")
-        //                dict_NodeIdConfigSubstationCT = LoadNodeIdConfig(eachGrp);
-        //            else if (eachGrp == "Production")
-        //                dict_NodeIdConfigLineWiseProdData = LoadNodeIdConfig(eachGrp);
-        //            else if (eachGrp == "SubStation_Losses")
-        //                dict_NodeIdConfigLosses = LoadNodeIdConfig(eachGrp);
-
-
-        //        }
-        //    }
-        //    catch(Exception ex)
-        //    {
-        //        Log.Error(ex, ex.ToString());
-        //    }
-            
-        //}
-
+        
         public void FillNodeIdConfig()
         {
             try

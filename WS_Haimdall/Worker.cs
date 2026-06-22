@@ -248,11 +248,11 @@ namespace WS_Haimdall
 
             catch (TimeoutException ex)
             {
-                Log.Error(ex, "Error at TimeoutException: " + ex.Message);
+                Log.Error(ex, "Error at TimeoutException: " + ex.ToString());
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Error at ConnectOPCSession" + ex.Message);
+                Log.Error(ex, "Error at ConnectOPCSession" + ex.ToString());
 
             }
             #endregion
