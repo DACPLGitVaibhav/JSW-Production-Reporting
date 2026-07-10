@@ -3,6 +3,7 @@ using Azure;
 using Microsoft.Extensions.Options;
 using Opc.Ua;
 using Opc.Ua.Client;
+using Opc.Ua.Configuration;
 using Opc.Ua.Security.Certificates;
 using Serilog;
 using Serilog;
@@ -12,12 +13,13 @@ using System.Data;
 using System.Net.NetworkInformation;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using WS_Haimdall;
 using WS_Haimdall.Model_Class;
+using WS_Haimdall.Model_Class;
 using static WS_Haimdall.Cache.AppCache;
 using static WS_Haimdall.Worker;
-using WS_Haimdall.Model_Class;
 
 namespace WS_Haimdall
 {
@@ -56,6 +58,17 @@ namespace WS_Haimdall
         private ConcurrentDictionary<string, string> lastCTCache = new();
         private static readonly ConcurrentQueue<CycleData> CTQueue = new();
         private readonly SemaphoreSlim _CTSignal = new(0);
+
+
+        /// <summary>
+        /// for Test subscriptions
+        /// </summary>
+        private Subscription _TestSubscription;
+        private ConcurrentDictionary<string, string> testCache = new();
+        private static readonly ConcurrentQueue<CycleTimeLineCTData> testQueue = new();
+        private readonly SemaphoreSlim _testSignal = new(0);
+
+
 
         /// <summary>
         /// for Cycle time Line CT subscriptions
@@ -126,7 +139,27 @@ namespace WS_Haimdall
                 bl.FillAlarmMaster();
                 bl.FillNodeIdConfig();
 
-                await ConnectOPCSession();
+                //fill the dictionary here..
+                dict_NodeTest.TryAdd("_Biwno", "ns=1;s=1.318.1.0.0.0");
+
+
+                var session = await ConnectAsync(
+           endpointUrl: _settings.Endpoint,//"opc.tcp://192.168.1.228:4890"
+           certSubjectName: "OpcUaClient",
+           username: _settings.Username,//"Admin"
+           password:_settings.Password);// "Admin@1234567"
+
+
+                //waiting for subscription then only we are going to
+                //start for the dumping.
+                if (IsSessionConnected(session))
+                {
+                    await Subscribe();
+                }
+                else { return; }
+
+                Console.WriteLine("Subscription count: " + session.SubscriptionCount);
+                //await ConnectOPCSession();
 
 
                 Log.Information("Ready/Started to Insert data..");
@@ -140,8 +173,11 @@ namespace WS_Haimdall
                 var mttr_mtbfData = InsertMTTR_MTBF_Data(stoppingToken);
 
                 await Task.WhenAll(alarmTask, ctTask, lineCtTask, subStTask, lineWiseProdData, lossesData, oeeData, mttr_mtbfData);
+
+                
+
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 Log.Error(ex, ex.ToString());
             }
@@ -152,6 +188,230 @@ namespace WS_Haimdall
 
 
         #region OPCUA_Con
+
+        public async Task<Session> ConnectAsync(
+   string endpointUrl,
+   string certSubjectName = "OpcUaClient",
+   string username = null,
+   string password = null)
+        {
+
+            try
+            {
+                string hostName = System.Net.Dns.GetHostName();
+
+                var appConfig = new ApplicationConfiguration
+                {
+                    ApplicationName = "OpcUaClientApp",
+                    ApplicationUri = $"urn:{hostName}:OpcUaClientApp",
+                    ApplicationType = ApplicationType.Client,
+
+                    SecurityConfiguration = new SecurityConfiguration
+                    {
+                        ApplicationCertificate = new CertificateIdentifier
+                        {
+                            StoreType = @"Directory",
+                            StorePath = @"%LocalAppData%/OPC/Certificates/own",
+                            SubjectName = $"CN={certSubjectName}, DC={hostName}"
+                        },
+                        TrustedIssuerCertificates = new CertificateTrustList
+                        {
+                            StoreType = @"Directory",
+                            StorePath = @"%LocalAppData%/OPC/Certificates/issuers"
+                        },
+                        TrustedPeerCertificates = new CertificateTrustList
+                        {
+                            StoreType = @"Directory",
+                            StorePath = @"%LocalAppData%/OPC/Certificates/trusted"
+                        },
+                        RejectedCertificateStore = new CertificateTrustList
+                        {
+                            StoreType = @"Directory",
+                            StorePath = @"%LocalAppData%/OPC/Certificates/rejected"
+                        },
+                        AutoAcceptUntrustedCertificates = true,
+                        AddAppCertToTrustedStore = true,
+                        MinimumCertificateKeySize = 2048
+                    },
+
+                    TransportConfigurations = new TransportConfigurationCollection(),
+                    TransportQuotas = new TransportQuotas
+                    {
+                        OperationTimeout = 15000,
+                        MaxStringLength = 1048576,
+                        MaxByteStringLength = 1048576,
+                        MaxArrayLength = 65535,
+                        MaxMessageSize = 4194304
+                    },
+                    ClientConfiguration = new ClientConfiguration
+                    {
+                        DefaultSessionTimeout = 60000,
+                        MinSubscriptionLifetime = 10000
+                    }
+                };
+
+                await appConfig.Validate(ApplicationType.Client);
+
+                var appInstance = new ApplicationInstance
+                {
+                    ApplicationName = appConfig.ApplicationName,
+                    ApplicationType = appConfig.ApplicationType,
+                    ApplicationConfiguration = appConfig
+                };
+
+                bool certOk = await appInstance.CheckApplicationInstanceCertificatesAsync(false);
+                if (!certOk)
+                    throw new Exception("Certificate check failed.");
+
+                appConfig.CertificateValidator.CertificateValidation += (sender, e) =>
+                {
+                    e.Accept = true;
+                };
+
+                EndpointDescription selectedEndpoint = CoreClientUtils.SelectEndpoint(
+                appConfig,
+                endpointUrl,
+                useSecurity: true);
+
+                if (selectedEndpoint == null)
+                    throw new Exception("No secure endpoint found.");
+
+
+                var configuredEndpoint = new ConfiguredEndpoint(
+                collection: null,
+                description: selectedEndpoint,
+                configuration: EndpointConfiguration.Create(appConfig));
+
+                configuredEndpoint.Description.SecurityMode = MessageSecurityMode.SignAndEncrypt;
+                configuredEndpoint.Description.SecurityPolicyUri = SecurityPolicies.Aes256_Sha256_RsaPss;
+
+                UserIdentity userIdentity;
+                if (!string.IsNullOrEmpty(username))
+                {
+                    var token = new UserNameIdentityToken
+                    {
+                        UserName = username,
+                        DecryptedPassword = Encoding.UTF8.GetBytes(password ?? string.Empty)
+                    };
+                    userIdentity = new UserIdentity(token);
+                }
+                else
+                {
+                    userIdentity = new UserIdentity(new AnonymousIdentityToken());
+                }
+
+                session = await Session.Create(
+                configuration: appConfig,
+                endpoint: configuredEndpoint,
+                updateBeforeConnect: true,
+                sessionName: "MyOpcSession",
+                sessionTimeout: 60000,
+                identity: userIdentity,
+                preferredLocales: null);
+
+                session.KeepAlive += _opcSession_KeepAlive;
+
+                if (session == null || !session.Connected)
+                    throw new Exception("Session creation failed.");
+
+                Console.WriteLine("─────────────────────────────────────");
+                Console.WriteLine("        OPC UA Connected              ");
+                Console.WriteLine("─────────────────────────────────────");
+                Console.WriteLine($" Session ID     : {session.SessionId}");
+                Console.WriteLine($" Server URI     : {session.Endpoint.Server.ApplicationUri}");
+                Console.WriteLine($" Endpoint URL   : {session.Endpoint.EndpointUrl}");
+                Console.WriteLine($" Security Mode  : {session.Endpoint.SecurityMode}");
+                Console.WriteLine($" Security Policy: {session.Endpoint.SecurityPolicyUri}");
+                Console.WriteLine($"[CONN] Endpoint : {selectedEndpoint.EndpointUrl}");
+                Console.WriteLine($"[CONN] Mode     : {selectedEndpoint.SecurityMode}");
+                Console.WriteLine($"[CONN] Policy   : {selectedEndpoint.SecurityPolicyUri}");
+                Console.WriteLine($" Timeout (ms)   : {session.SessionTimeout}");
+                Console.WriteLine("─────────────────────────────────────");
+
+
+                return session;
+                
+
+            }
+            catch (ServiceResultException ex)
+            {
+                Log.Error(ex, "Error at ServiceResultException" + ex.ToString());
+                throw;
+            }
+
+            catch (TimeoutException ex)
+            {
+                Log.Error(ex, "Error at TimeoutException: " + ex.ToString());
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error at ConnectOPCSession" + ex.ToString());
+                throw;
+            }
+
+        }
+
+
+
+        
+        public async Task Subscribe()
+        {
+            try
+            {
+                
+                
+                    Log.Information("Success: Session Created.");
+
+                    #region Single Event
+                    Log.Information("Subscribing tags..");
+
+
+                    //Test
+                    //await CreateTestSubscription();
+
+                //Alarm 
+                //CreateAlarmSubscription();
+
+                if (_settings.isLastPlc)
+                {
+                    //Line CT
+                 await CreateCycleTime_LineCTSubscription();
+
+                    //Prod
+                    await CreateLineWise_ProdDataSubscription();
+                }
+
+                //SubStation CT
+             await CreateCycleTime_SubstationCTSubscription();
+
+                ////Losses
+                await CreateLosses_Subscription();
+
+                ////OEE
+                //await CreateOEE_Subscription();
+
+                ////MTTR and MTBF
+                //await CreateMTTR_MTBF_Subscription();
+
+                Log.Information("Subscribed necessary tags.");
+                    #endregion
+
+                
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error at Subscribe" + ex.ToString());
+            }
+        }
+
+        private bool IsSessionConnected(Session session)
+        {
+            return session != null &&
+                   session.Connected &&
+                   !session.KeepAliveStopped;
+        }
+
         public async Task ConnectOPCSession()
 
         {
@@ -211,10 +471,13 @@ namespace WS_Haimdall
                     Log.Information("Subscribing tags..");
 
 
+                    //Test
+                    await CreateTestSubscription();
+
                     //Alarm 
                     //CreateAlarmSubscription();
-                    
-                    if(_settings.isLastPlc)
+
+                    if (_settings.isLastPlc)
                     {
                         //Line CT
                         await CreateCycleTime_LineCTSubscription();
@@ -309,6 +572,63 @@ namespace WS_Haimdall
             }
 
             
+        }
+
+
+
+
+
+        //Test Subscriptions method
+        private async Task CreateTestSubscription()
+        {
+            try
+            {
+                
+
+                _TestSubscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "TestSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_TestSubscription);
+                await _TestSubscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeTest)
+                {
+                    if (!eachItem.Key.Contains("_Biwno"))
+                        continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_TestSubscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnTestTrigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _TestSubscription.AddItems(monitoredItems);
+
+                await _TestSubscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+            }
+
         }
 
         //Line CT Subscriptions method
@@ -451,6 +771,7 @@ namespace WS_Haimdall
                     item.Notification += OnLineWiseProdDataTrigger;
 
                     monitoredItems.Add(item);
+                    
                 }
 
 
@@ -666,6 +987,61 @@ namespace WS_Haimdall
         }
 
 
+        private async void OnTestTrigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (testCache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    testCache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var testData = await ReadTestData(tag, timeStamp);
+                        if (testData != null)
+                        {
+                            testQueue.Enqueue(testData);
+                            _testSignal.Release();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+            }
+
+        }
+
         private async void OnCycleTimeLineCTTrigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
         {
             try
@@ -691,7 +1067,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (lastLineCTCache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId ||itemId==null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -746,7 +1122,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (lastSubStationCTCache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId || itemId==null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -801,7 +1177,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (lineWiseProdDataCache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId || itemId == null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -857,7 +1233,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (LossesCache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId || itemId == null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -912,7 +1288,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (OeeCache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId || itemId == null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -967,7 +1343,7 @@ namespace WS_Haimdall
                     // 🔥 Check duplicate
                     if (MTTR_MTBF_Cache.TryGetValue(tag, out var lastVal))
                     {
-                        if (lastVal == itemId)
+                        if (lastVal == itemId || itemId == null)
                             continue; // ❌ skip duplicate
                     }
 
@@ -999,6 +1375,113 @@ namespace WS_Haimdall
         #endregion
 
         #region DataRead       
+
+        private async Task<CycleTimeLineCTData?> ReadTestData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+               
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.315.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.316.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.317.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.318.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.319.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.320.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.321.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.322.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.323.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.324.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.325.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.326.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.327.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.328.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.329.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.330.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.331.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.332.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.333.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.334.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.335.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.336.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.337.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.338.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.339.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.340.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.341.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.342.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.343.1.0.0.0"), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse("ns=1;s=1.344.1.0.0.0"), AttributeId = Attributes.Value },
+                };
+
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                //if (!isAllGood)
+                //    return null;
+
+              
+
+                if (!isAllGood)
+                {
+
+
+                    Console.WriteLine("!!!!!!!!!!BAD STATUS CODE!!!!!!!!!!");
+                    for (int i = 0; i < results.Results.Count; i++)
+                    {
+                        Console.WriteLine(
+                            $"{nodesToRead[i].NodeId} | Status = {results.Results[i].StatusCode} | Value = {results.Results[i].Value}"
+                        );
+                    }
+
+
+                    return null;
+                }
+
+
+
+                //Console.WriteLine();
+                //return new CycleTimeLineCTData
+                //{
+                //    //LineID = Convert.ToInt32(Id),
+                //    //StartTime = ConvertPlcDateTime((byte[])results.Results[0].Value),
+                //    //EndTime = ConvertPlcDateTime((byte[])results.Results[1].Value),
+                //    //CycleTime = Convert.ToInt32(results.Results[2].Value),
+                //    //Biwno = Convert.ToString(results.Results[3].Value),
+                //    //VarriantCode = Convert.ToInt32(results.Results[4].Value),
+                //    //SubVarraintcode = Convert.ToInt32(results.Results[5].Value),
+                //    //TimeStamp = _timeStamp,//ConvertPlcDateTime((byte[])results.Results[1].Value),
+                //};
+
+
+                Console.WriteLine("----------------------------------------------------------");
+
+                for (int i = 0; i < results.Results.Count; i++)
+                {
+                    Console.WriteLine(
+                        $"Node {315 + i} : Value = {results.Results[i].Value}"
+                    );
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return null;
+            }
+
+        }
+
 
         private async Task<CycleTimeLineCTData?> ReadCycleTimeLineCTData(string key, DateTime _timeStamp)
         {
@@ -1038,8 +1521,8 @@ namespace WS_Haimdall
                 return new CycleTimeLineCTData
                 {
                     LineID = Convert.ToInt32(Id),
-                    StartTime = ConvertPlcDateTime((byte[])results.Results[0].Value),
-                    EndTime = ConvertPlcDateTime((byte[])results.Results[1].Value),
+                    StartTime = Convert.ToDateTime( results.Results[0].Value),//ConvertPlcDateTime((byte[])results.Results[0].Value),
+                    EndTime = Convert.ToDateTime(results.Results[1].Value),//ConvertPlcDateTime((byte[])results.Results[1].Value),
                     CycleTime = Convert.ToInt32(results.Results[2].Value),
                     Biwno = Convert.ToString(results.Results[3].Value),
                     VarriantCode = Convert.ToInt32(results.Results[4].Value),
@@ -1110,8 +1593,8 @@ namespace WS_Haimdall
 
                 return new CycleTimeSubStaionCTData
                 {
-                    StartTime = ConvertPlcDateTime((byte[])results.Results[0].Value),
-                    EndTime = ConvertPlcDateTime((byte[])results.Results[1].Value),
+                    StartTime =Convert.ToDateTime(results.Results[0].Value),// ConvertPlcDateTime((byte[])results.Results[0].Value),
+                    EndTime = Convert.ToDateTime(results.Results[1].Value),//ConvertPlcDateTime((byte[])results.Results[1].Value),
                     CycleTime = Convert.ToInt32(results.Results[2].Value),
                     Biwno = results.Results[3].Value.ToString(),
                     VarraintCode = Convert.ToInt32(results.Results[4].Value),
@@ -1182,7 +1665,18 @@ namespace WS_Haimdall
                 bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
 
                 if (!isAllGood)
+                {
+                    Console.WriteLine("!!!!!!!!!!BAD STATUS CODE!!!!!!!!!!");
+                    for (int i = 0; i < results.Results.Count; i++)
+                    {
+                        Console.WriteLine(
+                            $"{nodesToRead[i].NodeId} | Status = {results.Results[i].StatusCode} | Value = {results.Results[i].Value}"
+                        );
+                    }
+
                     return null;
+                }
+                    
 
                 return new LineWiseProdData
                 {
@@ -1837,6 +2331,8 @@ namespace WS_Haimdall
                         reconnectHandler = null;
 
                         Log.Information("PLC Reconnected Successfully!");
+
+                        Console.WriteLine("Session count after reconnecting: " + session.SubscriptionCount);
                     }
                 }
                 catch(Exception ex)

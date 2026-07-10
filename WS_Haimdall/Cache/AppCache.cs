@@ -17,6 +17,7 @@ namespace WS_Haimdall.Cache
         /// <summary>
         /// NodeId Config static members
         /// </summary>
+        public static ConcurrentDictionary<string, string> dict_NodeTest = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigLineCT = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigSubstationCT = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigLineWiseProdData = new ConcurrentDictionary<string, string>();

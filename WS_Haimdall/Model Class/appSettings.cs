@@ -16,6 +16,8 @@ namespace WS_Haimdall.Model_Class
         public int PlcNo { get; set; }
         public bool isLastPlc { get; set; }
 
+        public string Username { get; set; }
+        public string Password { get; set; }
     }
 
 }

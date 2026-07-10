@@ -262,7 +262,7 @@ namespace WS_Haimdall
                 var listParas = new List<SqlParameter>()
             {
 
-             new SqlParameter("@JsonData", jsonString)
+             new SqlParameter("@Json", jsonString)
 
             };
                 return await dbl.ExecSqlNonQuery("SP_Insert_Production", CommandType.StoredProcedure, listParas);
