@@ -49,6 +49,17 @@ namespace WS_Haimdall
 
                 dict_NodeIdConfigMTTRMTBF = LoadNodeIdConfig("SubStation_MTTR_MTBF");
 
+                dict_NodeIdConfigRobotSpot = LoadNodeIdConfig("RobotSpot");
+
+                dict_NodeIdConfigRobotTipChange = LoadNodeIdConfig("RobotTipChange");
+
+                dict_NodeIdConfigRobotStatus = LoadNodeIdConfig("RobotStatus");
+
+                dict_NodeIdConfigLineBuffer = LoadNodeIdConfig("LineBuffer");
+
+                dict_NodeIdConfigMarriageMismatch = LoadNodeIdConfig("MarriageMismatch");
+
+
             }
             catch (Exception ex)
             {
@@ -323,6 +334,102 @@ namespace WS_Haimdall
 
             };
                 return await dbl.ExecSqlNonQuery("SP_InsertUpdate_MTTR_MTBF", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
+
+        public async Task<int> InsertRobotSpotData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_Rbt_SpotCount", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
+
+        public async Task<int> InsertRobotTipChangeData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_Rbt_TipChangeCount", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
+
+        public async Task<int> InsertRobotStatusData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_Rbt_Status", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
+
+
+        public async Task<int> InsertLineBufferData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_LineBuffer", CommandType.StoredProcedure, listParas);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.ToString());
+                return 0;
+            }
+        }
+
+        public async Task<int> InsertMarriageMismatchData(object jsonString)
+        {
+            try
+            {
+                var listParas = new List<SqlParameter>()
+            {
+
+             new SqlParameter("@Json", jsonString)
+
+            };
+                return await dbl.ExecSqlNonQuery("SP_Insert_MarriageMismatch", CommandType.StoredProcedure, listParas);
             }
             catch (Exception ex)
             {

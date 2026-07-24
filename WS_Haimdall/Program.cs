@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Serilog;
 using WS_Haimdall;
 using WS_Haimdall.Model_Class;
@@ -37,8 +38,14 @@ try
     {
         options.ServiceName = "WS_Haimdall";
     });
-    builder.Services.Configure<appSettings>(
-        builder.Configuration.GetSection("appSettings"));
+    //builder.Services.Configure<appSettings>(
+       // builder.Configuration.GetSection("appSettings"));
+
+    //Bind AppSettings section → AppSettings classbuilder.
+    builder.Services.Configure<appSettings>(builder.Configuration.GetSection("AppSettings"));
+    //Register as singleton so Worker can inject itbuilder.
+    builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<appSettings>>().Value);
+
     var host = builder.Build();
     host.Run();
 

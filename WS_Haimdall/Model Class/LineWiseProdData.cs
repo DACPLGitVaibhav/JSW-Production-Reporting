@@ -11,6 +11,7 @@ namespace WS_Haimdall.Model_Class
     {
         public int? LineID { get; set; }
         public int? HourID { get; set; }
+        public int? PlanProd { get; set; }
         public int? JPH_J5_V23 { get; set; }
         public int? Target { get; set; }
 
@@ -20,7 +21,7 @@ namespace WS_Haimdall.Model_Class
 
         public int? V23_Target { get; set; }
         public int? V23_Actual { get; set; }
-        public DateTime? Timestamp { get; set; }
+        public DateTime? TimeStamp { get; set; }
         public DateTime? LogDateTime { get; set; }
     }
 

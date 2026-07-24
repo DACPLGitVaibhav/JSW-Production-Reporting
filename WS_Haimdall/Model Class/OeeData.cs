@@ -22,6 +22,6 @@ namespace WS_Haimdall.Model_Class
         public int? BreakDownTime { get; set; }
         public int? PerformanceLossTime { get; set; }
 
-        public DateTime? Timestamp { get; set; }
+        public DateTime? TimeStamp { get; set; }
     }
 }

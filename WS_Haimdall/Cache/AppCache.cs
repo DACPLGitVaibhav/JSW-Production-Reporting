@@ -24,5 +24,12 @@ namespace WS_Haimdall.Cache
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigLosses = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigOee = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, string> dict_NodeIdConfigMTTRMTBF = new ConcurrentDictionary<string, string>();
+        public static ConcurrentDictionary<string, string> dict_NodeIdConfigRobotSpot = new ConcurrentDictionary<string, string>();
+        public static ConcurrentDictionary<string, string> dict_NodeIdConfigRobotTipChange = new ConcurrentDictionary<string, string>();
+        public static ConcurrentDictionary<string, string> dict_NodeIdConfigRobotStatus = new ConcurrentDictionary<string, string>();
+
+
+        public static ConcurrentDictionary<string, string> dict_NodeIdConfigLineBuffer = new ConcurrentDictionary<string, string>();
+        public static ConcurrentDictionary<string, string> dict_NodeIdConfigMarriageMismatch = new ConcurrentDictionary<string, string>();
     }
 }

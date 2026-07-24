@@ -19,6 +19,6 @@ namespace WS_Haimdall.Model_Class
         public int? NetAvail_OperTime { get; set; }
         public int? BreakDownTime { get; set; }
 
-        public DateTime? Timestamp { get; set; }
+        public DateTime? TimeStamp { get; set; }
     }
 }

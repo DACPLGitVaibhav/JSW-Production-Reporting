@@ -11,6 +11,7 @@ using Serilog.Core;
 using System.Collections.Concurrent;
 using System.Data;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -119,15 +120,66 @@ namespace WS_Haimdall
         private static readonly ConcurrentQueue<MTTR_MTBF_Data> MTTR_MTBF_Queue = new();
         private readonly SemaphoreSlim _MTTR_MTBF_Signal = new(0);
 
+        /// <summary>
+        /// for Robot Spot subscriptions
+        /// </summary>
+        private Subscription _RobotSpot_Subscription;
+        private ConcurrentDictionary<string, string> RobotSpot_Cache = new();
+        private static readonly ConcurrentQueue<RobotSpot_Data> RobotSpot_Queue = new();
+        private readonly SemaphoreSlim _RobotSpot_Signal = new(0);
+
+
+        /// <summary>
+        /// for Robot Spot subscriptions
+        /// </summary>
+        private Subscription _RobotTipChange_Subscription;
+        private ConcurrentDictionary<string, string> RobotTipChange_Cache = new();
+        private static readonly ConcurrentQueue<RobotTipChange_Data> RobotTipChange_Queue = new();
+        private readonly SemaphoreSlim _RobotTipChange_Signal = new(0);
+
+        /// <summary>
+        /// for Robot Status subscriptions
+        /// </summary>
+        private Subscription _RobotStatus_Subscription;
+        private ConcurrentDictionary<string, string> RobotStatus_Cache = new();
+        private static readonly ConcurrentQueue<RobotStatus_Data> RobotStatus_Queue = new();
+        private readonly SemaphoreSlim _RobotStatus_Signal = new(0);
+
+        /// <summary>
+        /// for Line Buffer subscriptions
+        /// </summary>
+        private Subscription _LineBuffer_Subscription;
+        private ConcurrentDictionary<string, string> LineBuffer_Cache = new();
+        private static readonly ConcurrentQueue<LineBuffer> LineBuffer_Queue = new();
+        private readonly SemaphoreSlim _LineBuffer_Signal = new(0);
+
+
+        /// <summary>
+        /// for Line Buffer subscriptions
+        /// </summary>
+        private Subscription _MarriageMismatch_Subscription;
+        private ConcurrentDictionary<string, string> MarriageMismatch_Cache = new();
+        private static readonly ConcurrentQueue<MarriageMismatch> MarriageMismatch_Queue = new();
+        private readonly SemaphoreSlim _MarriageMismatch_Signal = new(0);
+
 
         private static Dictionary<string, string> tagDict;
+
+
+        private readonly OpcUaConnectionManager _opcConnectionManager;
+
+        bool isConnecting = false;
         #endregion
 
-        public Worker(ILogger<Worker> logger, IOptions<appSettings> options)
+        public Worker(ILogger<Worker> logger, /*IOptions<appSettings> options*/ appSettings options)
         {
-           // _logger = logger;
-            _settings = options.Value;
+            // _logger = logger;
+            //_settings = options.Value;
+            _settings = options;
             bl = new BusinessLayer(_settings.DB_Connection, _settings.PlcNo);
+
+            _opcConnectionManager =
+        new OpcUaConnectionManager();
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -139,28 +191,7 @@ namespace WS_Haimdall
                 bl.FillAlarmMaster();
                 bl.FillNodeIdConfig();
 
-                //fill the dictionary here..
-                dict_NodeTest.TryAdd("_Biwno", "ns=1;s=1.318.1.0.0.0");
-
-
-                var session = await ConnectAsync(
-           endpointUrl: _settings.Endpoint,//"opc.tcp://192.168.1.228:4890"
-           certSubjectName: "OpcUaClient",
-           username: _settings.Username,//"Admin"
-           password:_settings.Password);// "Admin@1234567"
-
-
-                //waiting for subscription then only we are going to
-                //start for the dumping.
-                if (IsSessionConnected(session))
-                {
-                    await Subscribe();
-                }
-                else { return; }
-
-                Console.WriteLine("Subscription count: " + session.SubscriptionCount);
-                //await ConnectOPCSession();
-
+                _= ReconnectLoop(stoppingToken);
 
                 Log.Information("Ready/Started to Insert data..");
                 var alarmTask = InsertAlarm(stoppingToken);
@@ -171,21 +202,126 @@ namespace WS_Haimdall
                 var lossesData = InsertLossesData(stoppingToken);
                 var oeeData = InsertOeeData(stoppingToken);
                 var mttr_mtbfData = InsertMTTR_MTBF_Data(stoppingToken);
+                var robotSpotData = InsertRobotSpot_Data(stoppingToken);
+                var robotTipChangeData = InsertRobotTipChange_Data(stoppingToken);
+                var robotStatusData = InsertRobotStatus_Data(stoppingToken);
+                var linebufferData = InsertLineBuffer_Data(stoppingToken);
+                var marriageMismatchData = InsertMarriageMismatch_Data(stoppingToken);
 
-                await Task.WhenAll(alarmTask, ctTask, lineCtTask, subStTask, lineWiseProdData, lossesData, oeeData, mttr_mtbfData);
 
-                
+                await Task.WhenAll(alarmTask, ctTask, lineCtTask, subStTask, lineWiseProdData, lossesData, oeeData, mttr_mtbfData, robotSpotData, robotTipChangeData, robotStatusData, linebufferData, marriageMismatchData);
+
+
 
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
            
         }
 
+        public override async Task StopAsync(
+    CancellationToken cancellationToken)
+        {
+            Log.Information(
+                "Stopping OPC UA Worker Service");
 
+           await ReconnectLoop(cancellationToken);
+            //_opcConnectionManager.Dispose();
+
+
+            await base.StopAsync(
+                cancellationToken);
+        }
+
+        private void Client_ReconnectComplete(object sender, EventArgs e)
+        {
+            lock (lockObj)
+            {
+                if (sender is SessionReconnectHandler handler)
+                {
+                    try
+                    {
+                        var oldSession = session;
+
+                        session = (Session)handler.Session;
+
+                        if (oldSession != null)
+                        {
+                            oldSession.KeepAlive -= _opcSession_KeepAlive;
+                            oldSession.Dispose();
+                        }
+
+                        handler.Dispose();
+                        reconnectHandler = null;
+
+                        Log.Information("PLC Reconnected successfully.");
+                        Log.Information("Subscription count after reconnecting: " + session.SubscriptionCount);
+
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error while completing OPC UA reconnection.");
+                    }
+                }
+            }
+        }
+
+        private async Task ReconnectLoop( CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    // ── Connect if not connected ──
+                    if (!isConnecting && (session == null || !session.Connected))
+                    {
+                        Log.Information("[OPC] Connecting...");
+                        await ConnectAsync(
+                        endpointUrl: _settings.Endpoint,
+                        certSubjectName: "OpcUaClient",
+                        username: _settings.Username,
+                        password: _settings.Password);
+                    }
+
+                    // ── Read tag to verify live connection ──
+                    if (session != null && session.Connected)
+                    {
+                        try
+                        {
+                            session.ReadValue(new NodeId("ns=1;s=1.3345.1.0.0.0"));
+                        }
+                        catch (ServiceResultException ex)
+                        {
+                            // Connection lost → dispose and reconnect next loop
+                            Log.Error("[OPC] Connection lost: {msg}", ex.Message);
+
+                            await ConnectAsync(
+                       endpointUrl: _settings.Endpoint,
+                       certSubjectName: "OpcUaClient",
+                       username: _settings.Username,
+                       password: _settings.Password);
+
+                        }
+                    }
+
+                    await Task.Delay(10000, token);
+                }
+                catch (TaskCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("[OPC] ReconnectLoop error: {msg}", ex.Message);
+                    await Task.Delay(10000, token);
+
+
+                }
+            }
+        }
 
         #region OPCUA_Con
 
@@ -195,9 +331,20 @@ namespace WS_Haimdall
    string username = null,
    string password = null)
         {
+            if (isConnecting)
+                return null;
 
             try
             {
+                isConnecting = true;
+
+                if (session != null)
+                {
+                    session.Close();
+                    session.Dispose();
+                    session = null;
+                }
+
                 string hostName = System.Net.Dns.GetHostName();
 
                 var appConfig = new ApplicationConfiguration
@@ -309,10 +456,24 @@ namespace WS_Haimdall
                 identity: userIdentity,
                 preferredLocales: null);
 
-                session.KeepAlive += _opcSession_KeepAlive;
-
+                //session.KeepAlive += _opcSession_KeepAlive;
+               
                 if (session == null || !session.Connected)
                     throw new Exception("Session creation failed.");
+
+
+                if (IsSessionConnected(session))
+                {
+                    Log.Information("Success: Session Created.");
+                    await Subscribe();
+
+                    Log.Information("Subscription Count : " + session.SubscriptionCount);
+                    Log.Information("Dict Count : " + dict_NodeIdConfigLineCT.Count());
+
+                }
+                else { return null; }
+
+
 
                 Console.WriteLine("─────────────────────────────────────");
                 Console.WriteLine("        OPC UA Connected              ");
@@ -335,19 +496,26 @@ namespace WS_Haimdall
             }
             catch (ServiceResultException ex)
             {
-                Log.Error(ex, "Error at ServiceResultException" + ex.ToString());
-                throw;
+                Log.Error("Connection for OPCUA Server for Simatic WinCC Unified Runtime - S failed due to BadIdentityTokenRejected: The user identity token is valid but the server has rejected it" + ex.Message);
+                return null;
+                //throw;
             }
 
             catch (TimeoutException ex)
             {
-                Log.Error(ex, "Error at TimeoutException: " + ex.ToString());
-                throw;
+                Log.Error("Error at TimeoutException: " + ex.Message);
+                return null;
+                //throw;
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Error at ConnectOPCSession" + ex.ToString());
-                throw;
+                Log.Error("Error at ConnectOPCSession" + ex.Message);
+                return null;
+                //throw;
+            }
+            finally
+            {
+                isConnecting = false;
             }
 
         }
@@ -359,16 +527,12 @@ namespace WS_Haimdall
         {
             try
             {
-                
-                
-                    Log.Information("Success: Session Created.");
-
                     #region Single Event
                     Log.Information("Subscribing tags..");
 
 
-                    //Test
-                    //await CreateTestSubscription();
+                //Test
+                //await CreateTestSubscription();
 
                 //Alarm 
                 //CreateAlarmSubscription();
@@ -376,23 +540,38 @@ namespace WS_Haimdall
                 if (_settings.isLastPlc)
                 {
                     //Line CT
-                 await CreateCycleTime_LineCTSubscription();
+                    await CreateCycleTime_LineCTSubscription();
 
                     //Prod
                     await CreateLineWise_ProdDataSubscription();
                 }
 
                 //SubStation CT
-             await CreateCycleTime_SubstationCTSubscription();
+                await CreateCycleTime_SubstationCTSubscription();
 
-                ////Losses
+                //Losses
                 await CreateLosses_Subscription();
 
                 ////OEE
-                //await CreateOEE_Subscription();
+                await CreateOEE_Subscription();
 
                 ////MTTR and MTBF
-                //await CreateMTTR_MTBF_Subscription();
+                await CreateMTTR_MTBF_Subscription();
+
+                //Robot Spot
+                await CreateRobotSpotCount_Subscription();
+
+                //Robot Tip Change
+                await CreateRobotTipChange_Subscription();
+
+                //Robot Tip 
+                await CreateRobotStatus_Subscription();
+
+                //Line Buffer
+                await CreateLineBuffer_Subscription();
+
+                //Marriage Mismatch
+                await CreateMarriageMismatch_Subscription();
 
                 Log.Information("Subscribed necessary tags.");
                     #endregion
@@ -401,7 +580,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Error at Subscribe" + ex.ToString());
+                Log.Error(ex, "Error at Subscribe" + ex.Message);
             }
         }
 
@@ -412,114 +591,6 @@ namespace WS_Haimdall
                    !session.KeepAliveStopped;
         }
 
-        public async Task ConnectOPCSession()
-
-        {
-            #region EventBased
-            try
-            {
-                //var endpointUrl = ConfigurationManager.AppSettings["Endpoint"].ToString(); //"opc.tcp://192.168.196.1:4840" Replace with your server's endpoint URL
-                var endpointUrl = "opc.tcp://192.168.0.13:4840"; //"opc.tcp://192.168.196.1:4840" Replace with your server's endpoint URL //_settings.Endpoint
-
-                Utils.SetTraceOutput(Utils.TraceOutput.Off);
-                var config = new ApplicationConfiguration()
-                {
-                    ServerConfiguration = new ServerConfiguration
-                    {
-                        UserTokenPolicies = new UserTokenPolicyCollection(new[] { new UserTokenPolicy(UserTokenType.UserName) }),
-                    },
-                    ApplicationName = "MyConfig",
-                    ApplicationType = ApplicationType.Client,
-                    SecurityConfiguration = new SecurityConfiguration
-                    {
-                        ApplicationCertificate = new CertificateIdentifier
-                        {
-                            StoreType = @"Windows",
-                            StorePath = @"CurrentUser\My",
-                            SubjectName = Utils.Format(@"CN={0}, DC={1}", "MyHomework", System.Net.Dns.GetHostName())
-                        },
-                        TrustedPeerCertificates = new CertificateTrustList
-                        {
-                            StoreType = @"Windows",
-                            StorePath = @"CurrentUser\TrustedPeople",
-                        },
-                        NonceLength = 32,
-                        AutoAcceptUntrustedCertificates = true
-                    },
-                    
-                    ClientConfiguration = new ClientConfiguration { }
-                };
-
-              
-
-                config.CertificateValidator = new CertificateValidator();
-                config.CertificateValidator.CertificateValidation += (s, certificateValidationEventArgs) =>
-                {
-                    certificateValidationEventArgs.Accept = true; // Accept all certificates for testing purposes; modify this for production.
-                };
-
-                // Create a new session with the OPC UA server asynchronously
-                session = await Session.Create(config, new ConfiguredEndpoint(null, new EndpointDescription(endpointUrl)), true, "", 60000, new UserIdentity(), null);
-           
-                if (session.Connected)
-                {
-                    session.KeepAlive += _opcSession_KeepAlive;
-
-                    Log.Information("Success: Session Created.");
-
-                    #region Single Event
-                    Log.Information("Subscribing tags..");
-
-
-                    //Test
-                    await CreateTestSubscription();
-
-                    //Alarm 
-                    //CreateAlarmSubscription();
-
-                    if (_settings.isLastPlc)
-                    {
-                        //Line CT
-                        await CreateCycleTime_LineCTSubscription();
-
-                        //Prod
-                        await CreateLineWise_ProdDataSubscription();
-                    }
-                        
-                    //SubStation CT
-                    await CreateCycleTime_SubstationCTSubscription();
-
-                    //Losses
-                    await CreateLosses_Subscription();
-
-                    //OEE
-                    await CreateOEE_Subscription();
-
-                    //MTTR and MTBF
-                    await CreateMTTR_MTBF_Subscription();
-
-                    Log.Information("Subscribed necessary tags.");
-                    #endregion
-                }
-                
-
-            }
-            catch (ServiceResultException ex)
-            {
-                Log.Error(ex, "Error at ServiceResultException" + ex.ToString());
-            }
-
-            catch (TimeoutException ex)
-            {
-                Log.Error(ex, "Error at TimeoutException: " + ex.ToString());
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error at ConnectOPCSession" + ex.ToString());
-
-            }
-            #endregion
-        }
         #endregion
 
         #region Subscription's      
@@ -568,7 +639,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
             
@@ -626,7 +697,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -677,7 +748,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
            
         }
@@ -728,7 +799,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
         }
@@ -781,7 +852,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
         }
@@ -832,7 +903,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -882,7 +953,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -932,7 +1003,266 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async Task CreateRobotSpotCount_Subscription()
+        {
+            try
+            {
+                _RobotSpot_Subscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "CycleTriggerSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_RobotSpot_Subscription);
+                await _RobotSpot_Subscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeIdConfigRobotSpot)
+                {
+                    if (!eachItem.Key.Contains("_BiwNo"))
+                        continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_RobotSpot_Subscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnRobotSpot_Trigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _RobotSpot_Subscription.AddItems(monitoredItems);
+
+                await _RobotSpot_Subscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        
+        private async Task CreateRobotTipChange_Subscription()
+        {
+            try
+            {
+                _RobotTipChange_Subscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "CycleTriggerSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_RobotTipChange_Subscription);
+                await _RobotTipChange_Subscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeIdConfigRobotTipChange)
+                {
+
+                    //Subscribe everything
+                    //if (!eachItem.Key.Contains("_BiwNo"))
+                    //    continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_RobotTipChange_Subscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnRobotTipChange_Trigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _RobotTipChange_Subscription.AddItems(monitoredItems);
+
+                await _RobotTipChange_Subscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async Task CreateRobotStatus_Subscription()
+        {
+            try
+            {
+                _RobotStatus_Subscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "CycleTriggerSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_RobotStatus_Subscription);
+                await _RobotStatus_Subscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeIdConfigRobotStatus)
+                {
+
+                    //Subscribe everything
+                    //if (!eachItem.Key.Contains("_BiwNo"))
+                    //    continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_RobotStatus_Subscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnRobotStatus_Trigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _RobotStatus_Subscription.AddItems(monitoredItems);
+
+                await _RobotStatus_Subscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async Task CreateLineBuffer_Subscription()
+        {
+            try
+            {
+                _LineBuffer_Subscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "CycleTriggerSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_LineBuffer_Subscription);
+                await _LineBuffer_Subscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeIdConfigLineBuffer)
+                {
+
+                    //Subscribe everything
+                    //if (!eachItem.Key.Contains("_BiwNo"))
+                    //    continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_LineBuffer_Subscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnLineBuffer_Trigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _LineBuffer_Subscription.AddItems(monitoredItems);
+
+                await _LineBuffer_Subscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async Task CreateMarriageMismatch_Subscription()
+        {
+            try
+            {
+                _MarriageMismatch_Subscription = new Subscription(session.DefaultSubscription)
+                {
+                    PublishingInterval = 250,
+                    DisplayName = "CycleTriggerSubscription",
+                    PublishingEnabled = true
+                };
+
+                session.AddSubscription(_MarriageMismatch_Subscription);
+                await _MarriageMismatch_Subscription.CreateAsync();
+
+                var monitoredItems = new List<Opc.Ua.Client.MonitoredItem>();
+
+                foreach (var eachItem in dict_NodeIdConfigMarriageMismatch)
+                {
+
+                    //Subscribe everything
+                    //if (!eachItem.Key.Contains("_BiwNo"))
+                    //    continue;
+
+                    string nodeIdStr = eachItem.Value;
+                    var item = new Opc.Ua.Client.MonitoredItem(_MarriageMismatch_Subscription.DefaultItem)
+                    {
+                        DisplayName = eachItem.Key.ToString(),// nodeIdStr,
+                        StartNodeId = new NodeId(nodeIdStr),
+                        AttributeId = Attributes.Value,
+                        SamplingInterval = 500,
+                        QueueSize = 10,
+                        DiscardOldest = true
+                    };
+
+                    // Correct way to attach the notification handler
+                    item.Notification += OnMarriageMismatch_Trigger;
+
+                    monitoredItems.Add(item);
+                }
+
+
+                _MarriageMismatch_Subscription.AddItems(monitoredItems);
+
+                await _MarriageMismatch_Subscription.ApplyChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -981,7 +1311,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
         }
@@ -1037,7 +1367,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -1092,7 +1422,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
         }
@@ -1147,7 +1477,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
             
         }
@@ -1202,7 +1532,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex.ToString());
+                Log.Error(ex.Message);
             }
             
         }
@@ -1258,7 +1588,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -1313,7 +1643,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -1368,10 +1698,298 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
+
+
+        private async void OnRobotSpot_Trigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (RobotSpot_Cache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId || itemId == null)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    RobotSpot_Cache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var RobotSpotData_lst = await ReadRobotSpotData(tag, timeStamp);
+                        if (RobotSpotData_lst != null)
+                        {
+                            foreach(var RobotSpotData in RobotSpotData_lst)
+                            {
+                                RobotSpot_Queue.Enqueue(RobotSpotData);
+                                _RobotSpot_Signal.Release();
+                            }
+                            
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+
+        private async void OnRobotTipChange_Trigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (RobotTipChange_Cache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId || itemId == null)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    RobotTipChange_Cache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var RobotTipChangeData = await ReadRobotTipChangeData(tag, timeStamp);
+                        if (RobotTipChangeData != null)
+                        {
+                            RobotTipChange_Queue.Enqueue(RobotTipChangeData);
+                            _RobotTipChange_Signal.Release();
+
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async void OnRobotStatus_Trigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (RobotStatus_Cache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId || itemId == null)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    RobotStatus_Cache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var RobotStatusData = await ReadRobotStatusData(tag, timeStamp);
+                        if (RobotStatusData != null)
+                        {
+                            RobotStatus_Queue.Enqueue(RobotStatusData);
+                            _RobotStatus_Signal.Release();
+
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+        private async void OnLineBuffer_Trigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (LineBuffer_Cache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId || itemId == null)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    LineBuffer_Cache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var LineBufferData = await ReadLineBufferData(tag, timeStamp);
+                        if (LineBufferData != null)
+                        {
+                            LineBuffer_Queue.Enqueue(LineBufferData);
+                            _LineBuffer_Signal.Release();
+
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+
+        private async void OnMarriageMismatch_Trigger(MonitoredItem item, MonitoredItemNotificationEventArgs e)
+        {
+            try
+            {
+                foreach (var value in item.DequeueValues())
+                {
+                    string tag = item.DisplayName;
+
+                    var sourceTime = value.SourceTimestamp.ToLocalTime();
+
+                    // SQL-friendly format
+                    var sqlTimeStamp = sourceTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+                    var timeStamp = Convert.ToDateTime(sqlTimeStamp);
+
+                    var itemId = value.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(itemId) || itemId == "0")
+                        return;
+
+
+
+                    // 🔥 Check duplicate
+                    if (MarriageMismatch_Cache.TryGetValue(tag, out var lastVal))
+                    {
+                        if (lastVal == itemId || itemId == null)
+                            continue; // ❌ skip duplicate
+                    }
+
+                    // ✅ update cache
+                    MarriageMismatch_Cache[tag] = itemId;
+                    //////////////////////////
+                    ///
+                    try
+                    {
+                        var MarriageMismatchData = await ReadMarriageMismatchData(tag, timeStamp);
+                        if (MarriageMismatchData != null)
+                        {
+                            MarriageMismatch_Queue.Enqueue(MarriageMismatchData);
+                            _MarriageMismatch_Signal.Release();
+
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error reading cycle data");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+            }
+
+        }
+
+
         #endregion
 
         #region DataRead       
@@ -1476,7 +2094,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
@@ -1532,7 +2150,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
             
@@ -1628,7 +2246,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
@@ -1651,8 +2269,10 @@ namespace WS_Haimdall
                     new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_JPHJ5V23"]), AttributeId = Attributes.Value },
                     new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_HourlyActual"]), AttributeId = Attributes.Value },
                     new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_J5Actual"]), AttributeId = Attributes.Value },
-                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_V23Actual"]), AttributeId = Attributes.Value }
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_V23Actual"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineWiseProdData[$"{lineId}_{hourId}_PlanProd"]), AttributeId = Attributes.Value }
                 };
+
 
                 var results = await session.ReadAsync(
                     null,
@@ -1676,7 +2296,7 @@ namespace WS_Haimdall
 
                     return null;
                 }
-                    
+
 
                 return new LineWiseProdData
                 {
@@ -1689,8 +2309,10 @@ namespace WS_Haimdall
                     J5_Actual = Convert.ToInt32(results.Results[3].Value),
                     V23_Target = 0,
                     V23_Actual = Convert.ToInt32(results.Results[4].Value),
-                    
-                    Timestamp = _timeStamp,
+                    PlanProd = Convert.ToInt32(results.Results[5].Value),
+
+
+                    TimeStamp = _timeStamp,
                     LogDateTime = _timeStamp,
 
                 };
@@ -1698,7 +2320,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
@@ -1790,7 +2412,7 @@ namespace WS_Haimdall
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
@@ -1846,13 +2468,13 @@ namespace WS_Haimdall
                     BreakDownTime = Convert.ToInt32(results.Results[5].Value),
                     PerformanceLossTime = Convert.ToInt32(results.Results[6].Value),
 
-                    Timestamp = _timeStamp
+                    TimeStamp = _timeStamp
                 };
 
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
@@ -1904,19 +2526,352 @@ namespace WS_Haimdall
                     NetAvail_OperTime = Convert.ToInt32(results.Results[3].Value),
                     BreakDownTime = Convert.ToInt32(results.Results[4].Value),
 
-                    Timestamp = _timeStamp
+                    TimeStamp = _timeStamp
                 };
 
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
 
 
 
         }
+
+        private async Task<List<RobotSpot_Data>?> ReadRobotSpotData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+                //1_MB110RB01_1_BiwNo
+
+                var keyArray = key.Split('_');
+
+                var Id = keyArray[0];
+                var subStation = keyArray[1];
+               // var gunId = keyArray[2];
+
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+
+                    //G1
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_1_BiwNo"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_1_Variant"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_1_Sub-Variant"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_1_SpotTarget"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_1_SpotActual"]), AttributeId = Attributes.Value },
+
+                    //G2
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_2_SpotTarget"]), AttributeId = Attributes.Value },
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotSpot[$"{Id}_{subStation}_2_SpotActual"]), AttributeId = Attributes.Value }
+
+                };
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+                return new List<RobotSpot_Data>
+                {
+                    new RobotSpot_Data
+                    {
+                        RobotID = Convert.ToInt32(Id),
+                        GunID = 1,//Convert.ToInt32(gunId),
+                        Biwno = Convert.ToString(results.Results[0].Value),
+                        Varraint = Convert.ToInt32(results.Results[1].Value),
+                        SubVarraint = Convert.ToInt32(results.Results[2].Value),
+                        Target = Convert.ToInt32(results.Results[3].Value),
+                        Actual = Convert.ToInt32(results.Results[4].Value),
+                        Timestamp = _timeStamp
+                    },
+                    new RobotSpot_Data
+                    {
+                        RobotID = Convert.ToInt32(Id),
+                        GunID = 2,
+                         Biwno = Convert.ToString(results.Results[0].Value),
+                        Varraint = Convert.ToInt32(results.Results[1].Value),
+                        SubVarraint = Convert.ToInt32(results.Results[2].Value),
+                        Target = Convert.ToInt32(results.Results[5].Value),
+                        Actual = Convert.ToInt32(results.Results[6].Value),
+                        Timestamp = _timeStamp
+                    }
+                };
+
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+                return null;
+            }
+
+
+
+        }
+
+        private async Task<RobotTipChange_Data?> ReadRobotTipChangeData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+                //1_MB110RB01_1_A
+                var keyArray = key.Split('_');
+
+                var Id = keyArray[0];
+                var subStation = keyArray[1];
+                var gunId = keyArray[2];
+                var shift = keyArray[3];
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotTipChange[$"{Id}_{subStation}_{gunId}_{shift}"]), AttributeId = Attributes.Value }
+                };
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+                return new RobotTipChange_Data
+                {
+                    RobotID = Convert.ToInt32(Id),
+                    GunID = Convert.ToInt32(gunId),
+
+                    Shift = shift,
+                    Value = Convert.ToInt32(results.Results[0].Value),
+
+                    Timstamp = _timeStamp
+                };
+
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+                return null;
+            }
+
+
+
+        }
+
+
+        private async Task<RobotStatus_Data?> ReadRobotStatusData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+                //1_MB110RB01_HealthStatus
+                //1_MB110RB01_Battery
+
+                var keyArray = key.Split('_');
+
+                var Id = keyArray[0];
+                var subStation = keyArray[1];
+                var healthStatus = keyArray[2];
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotStatus[$"{Id}_{subStation}_HealthStatus"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigRobotStatus[$"{Id}_{subStation}_Battery"]), AttributeId = Attributes.Value }
+                };
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+                return new RobotStatus_Data
+                {
+                    RobotID = Convert.ToInt32(Id),
+                   
+                    HealthStatus = Convert.ToInt32(results.Results[0].Value),
+                    BatteryStatus = Convert.ToBoolean(results.Results[1].Value),
+
+                    Timestamp = _timeStamp
+                };
+
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+                return null;
+            }
+
+
+
+        }
+
+        private async Task<LineBuffer?> ReadLineBufferData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+
+                //1_MB2_BufferCount
+
+                var keyArray = key.Split('_');
+
+                var lineId = keyArray[0];
+                var lineName = keyArray[1];
+
+
+                //          ,[LineID]
+                //,[Buffer_Count]
+                //,[Min_Threshold]
+                //,[Max_Threshold]
+                //,[Target]
+                //,[Status]
+                //,[TimeStamp]
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineBuffer[$"{lineId}_{lineName}_BufferCount"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineBuffer[$"{lineId}_{lineName}_MinThreshold"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineBuffer[$"{lineId}_{lineName}_MaxThreshold"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineBuffer[$"{lineId}_{lineName}_Target"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigLineBuffer[$"{lineId}_{lineName}_Status"]), AttributeId = Attributes.Value },
+
+                };
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+      
+
+                return new LineBuffer
+                {
+                    LineID = Convert.ToInt32(lineId),
+
+                    Buffer_Count = Convert.ToInt32(results.Results[0].Value),
+                    Min_Threshold = Convert.ToInt32(results.Results[1].Value),
+                    Max_Threshold = Convert.ToInt32(results.Results[2].Value),
+                    Target = Convert.ToInt32(results.Results[3].Value),
+                    Status = Convert.ToInt32(results.Results[4].Value),
+
+                    TimeStamp = _timeStamp
+                };
+
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+                return null;
+            }
+
+
+
+        }
+
+        private async Task<MarriageMismatch?> ReadMarriageMismatchData(string key, DateTime _timeStamp)
+        {
+            try
+            {
+
+                //1_MB110GEO_Body1Biw
+
+                var keyArray = key.Split('_');
+
+                var subStationId = keyArray[0];
+                var subStationName = keyArray[1];
+
+                //1_MB110GEO_Body1Biw
+                //1_MB110GEO_Body1Varraint
+                //1_MB110GEO_Body2Biw
+                //1_MB110GEO_Body2Varraint
+                //1_MB110GEO_Status
+
+                var nodesToRead = new ReadValueIdCollection
+                {
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigMarriageMismatch[$"{subStationId}_{subStationName}_Body1Biw"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigMarriageMismatch[$"{subStationId}_{subStationName}_Body1Varraint"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigMarriageMismatch[$"{subStationId}_{subStationName}_Body2Biw"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigMarriageMismatch[$"{subStationId}_{subStationName}_Body2Varraint"]), AttributeId = Attributes.Value },
+
+                    new ReadValueId { NodeId = NodeId.Parse(dict_NodeIdConfigMarriageMismatch[$"{subStationId}_{subStationName}_Status"]), AttributeId = Attributes.Value },
+
+                };
+
+                var results = await session.ReadAsync(
+                    null,
+                    0,
+                    TimestampsToReturn.Source,
+                    nodesToRead,
+                    CancellationToken.None
+                );
+
+                bool isAllGood = results.Results.All(r => StatusCode.IsGood(r.StatusCode));
+
+                if (!isAllGood)
+                    return null;
+
+
+
+                return new MarriageMismatch
+                {
+                    SubstaionID = Convert.ToInt32(subStationId),
+
+                    Body1_Biw = Convert.ToInt32(results.Results[0].Value),
+                    Body1_Varraint = Convert.ToInt32(results.Results[1].Value),
+                    Body2_Biw = Convert.ToInt32(results.Results[2].Value),
+                    Body2_Varraint = Convert.ToInt32(results.Results[3].Value),
+                    Status = Convert.ToInt32(results.Results[4].Value),
+
+                    TimeStamp = _timeStamp
+                };
+
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, ex.Message);
+                return null;
+            }
+
+
+
+        }
+
+
         private DateTime? ConvertPlcDateTime(byte[] bytes)
         {
             try
@@ -1942,7 +2897,7 @@ namespace WS_Haimdall
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
                 return null;
             }
             
@@ -1993,14 +2948,14 @@ namespace WS_Haimdall
                     }
                     catch (Exception ex)
                     {
-                        Log.Error(ex, "Error in background worker.");
+                        Log.Error(ex, "Error in background worker." + ex.Message);
                     }
 
                 }
             }
             catch(Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
 
         }
@@ -2096,7 +3051,7 @@ namespace WS_Haimdall
 
                     List<CycleTimeSubStaionCTData> batch = new();
 
-                   
+                  //  Log.Information("Substation Queue count: "+ SubStationCTQueue.Count().ToString());
                     while (SubStationCTQueue.TryDequeue(out var SubSt))
                     {
                         batch.Add(SubSt);
@@ -2118,7 +3073,7 @@ namespace WS_Haimdall
                 }
                 catch (Exception ex)
                 {
-                    Log.Error(ex, "Error in background worker.");
+                    Log.Error("Error in InsertSubStationCT(): " + ex.Message);
                 }
 
             }
@@ -2285,6 +3240,207 @@ namespace WS_Haimdall
             }
         }
 
+        private async Task InsertRobotSpot_Data(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _RobotSpot_Signal.WaitAsync(stoppingToken);
+
+
+                    List<RobotSpot_Data> batch = new();
+
+
+                    while (RobotSpot_Queue.TryDequeue(out var SubSt))
+                    {
+                        batch.Add(SubSt);
+                    }
+
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertRobotSpotData(jsonString);
+                        //Console.WriteLine($"{batch[0].TagName} | {batch[0].Value} | {batch[0].Timestamp}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error in background worker.");
+                }
+
+            }
+        }
+
+        private async Task InsertRobotTipChange_Data(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _RobotTipChange_Signal.WaitAsync(stoppingToken);
+
+
+                    List<RobotTipChange_Data> batch = new();
+
+
+                    while (RobotTipChange_Queue.TryDequeue(out var SubSt))
+                    {
+                        batch.Add(SubSt);
+                    }
+
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertRobotTipChangeData(jsonString);
+                        //Console.WriteLine($"{batch[0].TagName} | {batch[0].Value} | {batch[0].Timestamp}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error in background worker.");
+                }
+
+            }
+        }
+
+        private async Task InsertRobotStatus_Data(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _RobotStatus_Signal.WaitAsync(stoppingToken);
+
+
+                    List<RobotStatus_Data> batch = new();
+
+
+                    while (RobotStatus_Queue.TryDequeue(out var SubSt))
+                    {
+                        batch.Add(SubSt);
+                    }
+
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertRobotStatusData(jsonString);
+                        //Console.WriteLine($"{batch[0].TagName} | {batch[0].Value} | {batch[0].Timestamp}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error in background worker.");
+                }
+
+            }
+        }
+
+        private async Task InsertLineBuffer_Data(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _LineBuffer_Signal.WaitAsync(stoppingToken);
+
+
+                    List<LineBuffer> batch = new();
+
+
+                    while (LineBuffer_Queue.TryDequeue(out var SubSt))
+                    {
+                        batch.Add(SubSt);
+                    }
+
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertLineBufferData(jsonString);
+                        
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error in background worker.");
+                }
+
+            }
+        }
+
+        private async Task InsertMarriageMismatch_Data(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await _MarriageMismatch_Signal.WaitAsync(stoppingToken);
+
+
+                    List<MarriageMismatch> batch = new();
+
+
+                    while (MarriageMismatch_Queue.TryDequeue(out var SubSt))
+                    {
+                        batch.Add(SubSt);
+                    }
+
+
+                    if (batch.Count == 0)
+                    {
+                        await Task.Delay(500);
+                        continue;
+                    }
+
+
+                    if (batch.Count > 0)
+                    {
+                        string jsonString = JsonSerializer.Serialize(batch);
+                        await bl.InsertMarriageMismatchData(jsonString);
+
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error in background worker.");
+                }
+
+            }
+        }
+
+
         #endregion
 
         #region OPCUA_RecCon        
@@ -2309,39 +3465,41 @@ namespace WS_Haimdall
                             );
 
                             Log.Error("Error: trying to Reconnecting...");
+                            
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.ToString());
+                Log.Error(ex, ex.Message);
             }
         }
 
-        private void Client_ReconnectComplete(object? sender, EventArgs e)
-        {
-            lock (lockObj)
-            {
-                try
-                {
-                    if (sender is SessionReconnectHandler handler)
-                    {
-                        session = (Session)handler.Session;
-                        reconnectHandler = null;
+        //private void Client_ReconnectComplete(object? sender, EventArgs e)
+        //{
+        //    lock (lockObj)
+        //    {
+        //        try
+        //        {
+        //            if (sender is SessionReconnectHandler handler)
+        //            {
+        //                session = (Session)handler.Session;
+        //                reconnectHandler.Dispose();
+        //                reconnectHandler = null;
 
-                        Log.Information("PLC Reconnected Successfully!");
+        //                Log.Information("PLC Reconnected Successfully!");
 
-                        Console.WriteLine("Session count after reconnecting: " + session.SubscriptionCount);
-                    }
-                }
-                catch(Exception ex)
-                {
-                    Log.Error(ex, ex.ToString());
-                }
+        //                Console.WriteLine("Session count after reconnecting: " + session.SubscriptionCount);
+        //            }
+        //        }
+        //        catch(Exception ex)
+        //        {
+        //            Log.Error(ex, ex.Message);
+        //        }
                 
-            }
-        }
+        //    }
+        //}
         #endregion
 
 
